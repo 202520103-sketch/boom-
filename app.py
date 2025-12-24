@@ -1,175 +1,152 @@
 import streamlit as st
 import random
-import base64
-from collections import deque
+import time
+import json
+import os
 
-st.set_page_config(page_title="💣 Minesweeper", layout="centered")
-
-# ====================
-# 난이도 프리셋
-# ====================
+# ------------------ 설정 ------------------
 DIFFICULTY = {
-    "Easy": (8, 8, 10),
-    "Normal": (10, 10, 20),
-    "Hard": (12, 12, 30),
-    "Hell": (15, 15, 50)
+    "Easy": (8, 10),
+    "Normal": (12, 25),
+    "Hard": (16, 50)
 }
 
-st.sidebar.title("🎮 게임 설정")
-mode = st.sidebar.radio("난이도 선택", DIFFICULTY.keys())
-ROWS, COLS, MINES = DIFFICULTY[mode]
+SCORE_FILE = "best_score.json"
 
-# ====================
-# 폭발 효과음 (짧은 펑)
-# ====================
-EXPLOSION_SOUND = """
-UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQgAAAAA////
-////////////////////////////////////////////
-"""
+# ------------------ 점수 저장 ------------------
+def load_scores():
+    if os.path.exists(SCORE_FILE):
+        with open(SCORE_FILE, "r") as f:
+            return json.load(f)
+    return {}
 
-def play_explosion():
-    st.audio(base64.b64decode(EXPLOSION_SOUND), format="audio/wav")
+def save_scores(scores):
+    with open(SCORE_FILE, "w") as f:
+        json.dump(scores, f)
 
-# ====================
-# 게임 초기화
-# ====================
-def init_game():
-    board = [[0]*COLS for _ in range(ROWS)]
-    opened = [[False]*COLS for _ in range(ROWS)]
-    flags = [[False]*COLS for _ in range(ROWS)]
-
-    positions = [(r, c) for r in range(ROWS) for c in range(COLS)]
-    mines = random.sample(positions, MINES)
-
-    for r, c in mines:
-        board[r][c] = -1
-
-    for r in range(ROWS):
-        for c in range(COLS):
-            if board[r][c] == -1:
-                continue
-            board[r][c] = sum(
-                1 for dr in [-1, 0, 1] for dc in [-1, 0, 1]
-                if 0 <= r+dr < ROWS and 0 <= c+dc < COLS
-                and board[r+dr][c+dc] == -1
-            )
-
-    st.session_state.board = board
-    st.session_state.opened = opened
-    st.session_state.flags = flags
+# ------------------ 게임 초기화 ------------------
+def init_game(size, mines):
+    st.session_state.size = size
+    st.session_state.mines = mines
+    st.session_state.start_time = time.time()
     st.session_state.game_over = False
     st.session_state.win = False
-    st.session_state.flag_mode = False
-    st.session_state.mode = mode
 
-# ====================
-# 연쇄 오픈 (0 클릭)
-# ====================
-def open_cells(sr, sc):
-    q = deque([(sr, sc)])
-    while q:
-        r, c = q.popleft()
-        if st.session_state.opened[r][c] or st.session_state.flags[r][c]:
-            continue
-        st.session_state.opened[r][c] = True
-        if st.session_state.board[r][c] == 0:
-            for dr in [-1, 0, 1]:
-                for dc in [-1, 0, 1]:
+    st.session_state.board = [[0]*size for _ in range(size)]
+    st.session_state.visible = [[False]*size for _ in range(size)]
+    st.session_state.flagged = [[False]*size for _ in range(size)]
+
+    positions = random.sample(range(size*size), mines)
+    for p in positions:
+        r, c = divmod(p, size)
+        st.session_state.board[r][c] = -1
+
+    for r in range(size):
+        for c in range(size):
+            if st.session_state.board[r][c] == -1:
+                continue
+            count = 0
+            for dr in (-1,0,1):
+                for dc in (-1,0,1):
                     nr, nc = r+dr, c+dc
-                    if 0 <= nr < ROWS and 0 <= nc < COLS:
-                        q.append((nr, nc))
+                    if 0 <= nr < size and 0 <= nc < size:
+                        if st.session_state.board[nr][nc] == -1:
+                            count += 1
+            st.session_state.board[r][c] = count
 
-# 난이도 변경 시 리셋
-if "mode" not in st.session_state or st.session_state.mode != mode:
-    init_game()
+# ------------------ 빈칸 확장 ------------------
+def flood_fill(r, c):
+    stack = [(r, c)]
+    while stack:
+        x, y = stack.pop()
+        if st.session_state.visible[x][y]:
+            continue
+        st.session_state.visible[x][y] = True
+        if st.session_state.board[x][y] == 0:
+            for dr in (-1,0,1):
+                for dc in (-1,0,1):
+                    nx, ny = x+dr, y+dc
+                    if 0 <= nx < st.session_state.size and 0 <= ny < st.session_state.size:
+                        if not st.session_state.visible[nx][ny]:
+                            stack.append((nx, ny))
 
-# ====================
-# 스타일 (크게!)
-# ====================
-st.markdown("""
-<style>
-button {
-    width: 46px !important;
-    height: 46px !important;
-    border-radius: 6px !important;
-    font-size: 24px !important;
-    font-weight: bold !important;
-}
-</style>
-""", unsafe_allow_html=True)
+# ------------------ 전체 공개 ------------------
+def reveal_all():
+    for r in range(st.session_state.size):
+        for c in range(st.session_state.size):
+            st.session_state.visible[r][c] = True
 
-st.title("💣 Minesweeper")
-st.caption(f"난이도: {mode} | 지뢰 {MINES}개")
+# ------------------ 클릭 처리 ------------------
+def click_cell(r, c):
+    if st.session_state.game_over or st.session_state.flagged[r][c]:
+        return
 
-# ====================
-# 깃발 모드 토글
-# ====================
-st.session_state.flag_mode = st.toggle("🚩 깃발 모드", value=st.session_state.flag_mode)
-
-# ====================
-# 보드 출력
-# ====================
-opened_count = 0
-colors = ["blue", "green", "red", "purple", "brown", "black"]
-
-for r in range(ROWS):
-    cols = st.columns(COLS)
-    for c in range(COLS):
-        with cols[c]:
-            val = st.session_state.board[r][c]
-            opened = st.session_state.opened[r][c]
-            flagged = st.session_state.flags[r][c]
-
-            if opened:
-                opened_count += 1
-                if val == -1:
-                    st.markdown("<span style='font-size:28px'>💥</span>", unsafe_allow_html=True)
-                elif val > 0:
-                    st.markdown(
-                        f"<span style='color:{colors[val-1]}; font-size:26px; font-weight:800'>{val}</span>",
-                        unsafe_allow_html=True
-                    )
-                else:
-                    st.markdown("")  # 빈칸은 아무것도 안 보이게
-            else:
-                label = "🚩" if flagged else " "
-                if st.button(label, key=f"{r}-{c}", disabled=st.session_state.game_over):
-                    if st.session_state.flag_mode:
-                        st.session_state.flags[r][c] = not flagged
-                    else:
-                        if flagged:
-                            pass
-                        elif val == -1:
-                            st.session_state.game_over = True
-                            play_explosion()
-                            for i in range(ROWS):
-                                for j in range(COLS):
-                                    st.session_state.opened[i][j] = True
-                        else:
-                            open_cells(r, c)
-
-# ====================
-# 승리 조건
-# ====================
-if not st.session_state.game_over:
-    if opened_count == ROWS * COLS - MINES:
-        st.session_state.win = True
+    if st.session_state.board[r][c] == -1:
         st.session_state.game_over = True
+        reveal_all()
+        st.audio("https://www.soundjay.com/explosion/sounds/explosion-01.mp3")
+    else:
+        flood_fill(r, c)
+        check_win()
 
-# ====================
-# 결과 화면
-# ====================
+def toggle_flag(r, c):
+    if not st.session_state.visible[r][c]:
+        st.session_state.flagged[r][c] = not st.session_state.flagged[r][c]
+
+# ------------------ 승리 체크 ------------------
+def check_win():
+    for r in range(st.session_state.size):
+        for c in range(st.session_state.size):
+            if st.session_state.board[r][c] != -1 and not st.session_state.visible[r][c]:
+                return
+    st.session_state.win = True
+    st.session_state.game_over = True
+
+    elapsed = int(time.time() - st.session_state.start_time)
+    scores = load_scores()
+    key = st.session_state.difficulty
+    if key not in scores or elapsed < scores[key]:
+        scores[key] = elapsed
+        save_scores(scores)
+
+# ------------------ UI ------------------
+st.set_page_config(layout="wide")
+st.title("💣 Minesweeper")
+
+difficulty = st.selectbox("난이도", list(DIFFICULTY.keys()))
+size, mines = DIFFICULTY[difficulty]
+st.session_state.difficulty = difficulty
+
+if "board" not in st.session_state or st.button("🔄 새 게임"):
+    init_game(size, mines)
+
+scores = load_scores()
+if difficulty in scores:
+    st.info(f"🏆 최고기록: {scores[difficulty]}초")
+
+# ------------------ 보드 출력 ------------------
+for r in range(size):
+    cols = st.columns(size)
+    for c in range(size):
+        with cols[c]:
+            if st.session_state.visible[r][c]:
+                v = st.session_state.board[r][c]
+                if v == -1:
+                    st.markdown("<div style='font-size:32px;'>💣</div>", unsafe_allow_html=True)
+                elif v == 0:
+                    st.markdown("<div style='font-size:28px;'>&nbsp;</div>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<div style='font-size:32px; font-weight:bold;'>{v}</div>", unsafe_allow_html=True)
+            else:
+                if st.session_state.flagged[r][c]:
+                    st.button("🚩", key=f"f{r}{c}", on_click=toggle_flag, args=(r,c))
+                else:
+                    st.button(" ", key=f"b{r}{c}", on_click=click_cell, args=(r,c))
+
+# ------------------ 결과 ------------------
 if st.session_state.game_over:
     if st.session_state.win:
-        st.markdown(
-            "<h2 style='color:green; text-align:center;'>🎉 YOU SURVIVED 🎉</h2>",
-            unsafe_allow_html=True
-        )
+        st.markdown("<h2 style='text-align:center;color:green;'>🎉 YOU SURVIVED 🎉</h2>", unsafe_allow_html=True)
     else:
-        st.markdown(
-            "<h2 style='color:red; text-align:center;'>☠️ YOU DEAD ☠️</h2>",
-            unsafe_allow_html=True
-        )
+        st.markdown("<h2 style='text-align:center;color:red;'>☠️ YOU DEAD ☠️</h2>", unsafe_allow_html=True)
 
-    if st.button("🔄 다시 시작"):
-        init_game()
